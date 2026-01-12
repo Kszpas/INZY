@@ -1,0 +1,21 @@
+import os
+
+folder = "pola"           # 📂 Twój folder ze zdjęciami
+prefix = "white_"         # 🏷️ prefiks np. "empty_", "white_", "black_"
+ext = ".jpg"              # rozszerzenie plików
+
+files = sorted(os.listdir(folder))  # sortuj dla kolejności np. pola 1-64
+
+for i, filename in enumerate(files, start=202):
+    old_path = os.path.join(folder, filename)
+    new_filename = f"{prefix}{i:05d}{ext}"
+    new_path = os.path.join(folder, new_filename)
+    os.rename(old_path, new_path)
+
+print("✅ Zmieniono nazwy wszystkich plików")
+
+# empty 534
+
+# white 154
+
+# black 128

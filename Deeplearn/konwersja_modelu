@@ -1,0 +1,31 @@
+import tensorflow as tf
+
+# Załaduj model zapisany w starszym formacie HDF5
+model = tf.keras.models.load_model('models/field_classifier_final_balanced.keras')
+
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+# Utwórz prosty generator (bez augmentacji, tylko rescale)
+datagen = ImageDataGenerator(rescale=1./255)
+
+# Wczytaj dane z folderu TRAIN
+train_gen = datagen.flow_from_directory(
+    'dataset/train',   # <-- ścieżka do folderu z danymi treningowymi
+    target_size=(64,64),
+    class_mode='categorical'
+)
+
+# Wczytaj dane z folderu VAL (opcjonalnie, żeby sprawdzić spójność)
+val_gen = datagen.flow_from_directory(
+    'dataset/val',     # <-- ścieżka do walidacji
+    target_size=(64,64),
+    class_mode='categorical'
+)
+
+print("\n📂 Kolejność klas w TRAIN:")
+print(train_gen.class_indices)
+
+print("\n📂 Kolejność klas w VAL:")
+print(val_gen.class_indices)
+print(train_ds.class_names)
+
