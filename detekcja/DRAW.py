@@ -18,6 +18,8 @@ cv.rectangle(blank, (0,0), (250, 500), (0, 255, 0), thickness=cv.FILLED)
 cv.imshow("Rectangle", blank)
 
 
-
+cv.rectangle(blank, (0,0), (250, 500), (0, 255, 0), thickness=cv.FILLED)
+cv.imshow("Rectangle", blank)
 
 cv.waitKey(0)
+
