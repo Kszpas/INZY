@@ -11,24 +11,32 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import tkinter as tk
 from tkinter import font
+from typing import Optional
 import plansza
 
 # === PARAMETRY ===
 CAMERA_INDEX = 1
 OUTPUT_SIZE = (512, 512)
-ANALYSIS_INTERVAL = 0.8  # sekundy między analizami (tryb plynny)
+ANALYSIS_INTERVAL = 0.25  # sekundy między analizami (profil BALANCED)
 CLASS_NAMES = ["black", "empty", "white"]
 REQUIRED_CONSECUTIVE = 2  # bazowa liczba potwierdzen; dalej adaptowana dynamicznie
-STATE_BUFFER_SIZE = 5
+STATE_BUFFER_SIZE = 4
 MIN_STABLE_VOTES = 3
 LEGAL_MOVE_MAX_DIST = 6
 LEGAL_MOVE_MIN_MARGIN = 1
 RECOVERY_TRIGGER_STREAK = 3
 RECOVERY_MAX_DIST = 4
 RECOVERY_MIN_MARGIN = 1
+HAND_MOTION_RATIO = 0.10
+HAND_COOLDOWN_SEC = 0.40
+MIN_MEAN_CONF_FOR_COMMIT = 0.60
+DEBUG_PRINT_EVERY = 5
 
 # === MODEL ===
-model = tf.keras.models.load_model('models/model_szachowy.keras')
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+_project_root = os.path.dirname(_script_dir)
+_model_path = os.path.join(_project_root, 'models', 'model_szachowy.keras')
+model = tf.keras.models.load_model(_model_path)
 
 
 def get_model_input_size(keras_model, fallback=(96, 96)):
@@ -84,6 +92,9 @@ runtime_status = {
     "legal_dist": None,
     "legal_margin": None,
     "illegal_streak": 0,
+    "motion_ratio": 0.0,
+    "mean_confidence": 0.0,
+    "proposal_type": "-",
     "last_action": "-",
 }
 
@@ -232,12 +243,16 @@ cv.setMouseCallback("Kamera", select_corner)
 load_calibration()
 
 # --- ANALIZA PLANSZY ---
-def analyze_board_with_model(warped_img, v_lines, h_lines):
+def analyze_board_with_model(
+    warped_img: np.ndarray,
+    v_lines: list[tuple[int, int]],
+    h_lines: list[tuple[int, int]],
+) -> tuple[dict[str, str], float]:
     global analysis_counter
     v = sorted(v_lines, key=lambda p: p[0])
     h = sorted(h_lines, key=lambda p: p[1])
     if len(v) != 9 or len(h) != 9:
-        return {}
+        return {}, 0.0
 
     tiles, coords = [], []
 
@@ -259,25 +274,31 @@ def analyze_board_with_model(warped_img, v_lines, h_lines):
 
     preds = model.predict(np.stack(tiles), verbose=0)
     labels = [CLASS_NAMES[np.argmax(p)] for p in preds]
+    confs = [float(np.max(p)) for p in preds]
     board_results = dict(zip(coords, labels))
+    mean_confidence = float(np.mean(confs)) if confs else 0.0
 
-    # Czytelny wydruk: każda analiza ma swój blok z nagłówkiem i separatorami.
+    # Czytelny wydruk ograniczony do interwału debug, aby nie blokowac petli.
     analysis_counter += 1
-    stamp = datetime.now().strftime('%H:%M:%S')
-    symbol_map = {"white": "W", "black": "B", "empty": "."}
-    print("\n" + "=" * 78)
-    print(f"ANALIZA #{analysis_counter} | {stamp} | klasy: W=white, B=black, .=empty")
-    print("      a  b  c  d  e  f  g  h")
+    if analysis_counter % DEBUG_PRINT_EVERY == 0:
+        stamp = datetime.now().strftime('%H:%M:%S')
+        symbol_map = {"white": "W", "black": "B", "empty": "."}
+        print("\n" + "=" * 78)
+        print(
+            f"ANALIZA #{analysis_counter} | {stamp} | "
+            f"mean_conf={mean_confidence:.2f} | klasy: W=white, B=black, .=empty"
+        )
+        print("      a  b  c  d  e  f  g  h")
 
-    for rank in range(8, 0, -1):
-        rank_squares = [f"{chr(ord('a') + c)}{rank}" for c in range(8)]
-        rank_data = [(sq, board_results[sq]) for sq in rank_squares]
-        row_symbols = "  ".join(symbol_map[board_results[sq]] for sq in rank_squares)
-        print(f"Rzad {rank}: {row_symbols}   {rank_data}")
+        for rank in range(8, 0, -1):
+            rank_squares = [f"{chr(ord('a') + c)}{rank}" for c in range(8)]
+            rank_data = [(sq, board_results[sq]) for sq in rank_squares]
+            row_symbols = "  ".join(symbol_map[board_results[sq]] for sq in rank_squares)
+            print(f"Rzad {rank}: {row_symbols}   {rank_data}")
 
-    print("=" * 78 + "\n")
+        print("=" * 78 + "\n")
 
-    return board_results
+    return board_results, mean_confidence
 
 
 def save_move_to_file(text):
@@ -388,7 +409,13 @@ def get_stable_state_from_buffer(state_buffer):
     return stable, unstable_squares
 
 
-def get_required_consecutive(proposal, unstable_squares, illegal_streak):
+def get_required_consecutive(
+    proposal: dict,
+    unstable_squares: Optional[int],
+    illegal_streak: int,
+    mean_confidence: float,
+    motion_ratio: float,
+) -> int:
     """Adaptive confirmation threshold: lower latency when confidence is high."""
     req = REQUIRED_CONSECUTIVE
 
@@ -413,6 +440,10 @@ def get_required_consecutive(proposal, unstable_squares, illegal_streak):
         req += 1
     if illegal_streak > 0:
         req += 1
+    if mean_confidence < MIN_MEAN_CONF_FOR_COMMIT:
+        req += 1
+    if motion_ratio >= HAND_MOTION_RATIO * 0.7:
+        req += 1
 
     return min(req, 5)
 
@@ -435,6 +466,8 @@ def draw_runtime_overlay(img):
         f"candidate: {st.get('candidate', '-')}",
         f"confirm: {st.get('candidate_count', 0)}/{st.get('required_count', REQUIRED_CONSECUTIVE)}",
         f"unstable: {st.get('stable_unstable', 0)}",
+        f"motion/conf: {st.get('motion_ratio', 0.0):.2f}/{st.get('mean_confidence', 0.0):.2f}",
+        f"proposal: {st.get('proposal_type', '-')}",
         f"legal d/m: {st.get('legal_dist', '-')}/{st.get('legal_margin', '-')}",
         f"illegal streak: {st.get('illegal_streak', 0)}",
         f"last: {st.get('last_action', '-')}",
@@ -586,6 +619,20 @@ def detect_move(prev_state, current_state):
     return None
 
 # --- OBSŁUGA WĄTKU PREDYKCJI ---
+def compute_motion_ratio(
+    current_img: Optional[np.ndarray],
+    previous_img: Optional[np.ndarray],
+) -> float:
+    """Return ratio of changed pixels in [0..1] between two warped frames."""
+    if current_img is None or previous_img is None:
+        return 0.0
+    gray_current = cv.cvtColor(current_img, cv.COLOR_BGR2GRAY)
+    gray_previous = cv.cvtColor(previous_img, cv.COLOR_BGR2GRAY)
+    diff = cv.absdiff(gray_current, gray_previous)
+    _, binary = cv.threshold(diff, 25, 255, cv.THRESH_BINARY)
+    return float(np.count_nonzero(binary)) / float(binary.size)
+
+
 def prediction_loop():
     global stop_flag, prev_state, candidate_move
     print(f"▶️ Analiza co {ANALYSIS_INTERVAL}s uruchomiona.")
@@ -596,6 +643,8 @@ def prediction_loop():
     candidate_count = 0
     illegal_streak = 0
     state_buffer = deque(maxlen=STATE_BUFFER_SIZE)
+    prev_warp_for_motion = None
+    hand_cooldown_until = 0.0
 
     while not stop_flag:
         update_runtime_status(mode="WAIT_FRAME")
@@ -609,8 +658,44 @@ def prediction_loop():
             update_runtime_status(mode="WAIT_WARP", last_action="Brak obrazu po transformacji")
             continue
 
+        motion_ratio = compute_motion_ratio(img_copy, prev_warp_for_motion)
+        prev_warp_for_motion = img_copy
+        now = time.time()
+
+        if motion_ratio >= HAND_MOTION_RATIO:
+            hand_cooldown_until = now + HAND_COOLDOWN_SEC
+            candidate_move = None
+            candidate_count = 0
+            update_runtime_status(
+                mode="HAND_GATING",
+                motion_ratio=motion_ratio,
+                mean_confidence=0.0,
+                proposal_type="-",
+                candidate="-",
+                candidate_count=0,
+                last_action="Wysoki ruch sceny - czekam az dlon zniknie",
+            )
+            continue
+
+        if now < hand_cooldown_until:
+            candidate_move = None
+            candidate_count = 0
+            update_runtime_status(
+                mode="HAND_COOLDOWN",
+                motion_ratio=motion_ratio,
+                proposal_type="-",
+                candidate="-",
+                candidate_count=0,
+                last_action="Cooldown po wykryciu ruchu globalnego",
+            )
+            continue
+
         update_runtime_status(mode="ANALYZE")
-        observed_state = analyze_board_with_model(img_copy, vertical_lines, horizontal_lines)
+        observed_state, mean_confidence = analyze_board_with_model(
+            img_copy,
+            vertical_lines,
+            horizontal_lines,
+        )
         if not observed_state:
             continue
         state_buffer.append(observed_state)
@@ -641,6 +726,7 @@ def prediction_loop():
                 "fr": fr,
                 "to": to,
                 "color": color,
+                "partial": fr == '?' or to == '?',
             }
         else:
             with lock:
@@ -654,6 +740,7 @@ def prediction_loop():
                     "color": legal_guess["color"],
                     "dist": legal_guess["dist"],
                     "margin": legal_guess["margin"],
+                    "partial": False,
                 }
 
         if proposal is None:
@@ -667,11 +754,22 @@ def prediction_loop():
                 candidate_count=0,
                 legal_dist=None,
                 legal_margin=None,
+                motion_ratio=motion_ratio,
+                mean_confidence=mean_confidence,
+                proposal_type="-",
                 last_action="Brak ruchu",
             )
             continue
 
-        required_count = get_required_consecutive(proposal, unstable_squares, illegal_streak)
+        required_count = get_required_consecutive(
+            proposal,
+            unstable_squares,
+            illegal_streak,
+            mean_confidence,
+            motion_ratio,
+        )
+        if proposal.get("partial"):
+            required_count = min(required_count + 1, 5)
         candidate_label = proposal_key[1] if proposal["type"] == "legal" else f"{proposal['fr']}->{proposal['to']}"
         update_runtime_status(
             mode="CANDIDATE",
@@ -680,6 +778,9 @@ def prediction_loop():
             required_count=required_count,
             legal_dist=proposal.get("dist"),
             legal_margin=proposal.get("margin"),
+            motion_ratio=motion_ratio,
+            mean_confidence=mean_confidence,
+            proposal_type=proposal["type"],
         )
 
         # Jeżeli wykryto ruch, porównaj z poprzednim kandydatem
