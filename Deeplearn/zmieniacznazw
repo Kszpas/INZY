@@ -1,21 +1,32 @@
 import os
 
-folder = "pola"           # 📂 Twój folder ze zdjęciami
-prefix = "white_"         # 🏷️ prefiks np. "empty_", "white_", "black_"
-ext = ".jpg"              # rozszerzenie plików
+folder = "pola"
+prefix = "v2emptyy"
+start_index = 1
 
-files = sorted(os.listdir(folder))  # sortuj dla kolejności np. pola 1-64
+files = sorted(
+    name for name in os.listdir(folder) if os.path.isfile(os.path.join(folder, name))
+)
 
-for i, filename in enumerate(files, start=202):
+# First pass: move files to temporary names to avoid rename collisions.
+temp_pairs = []
+for idx, filename in enumerate(files):
     old_path = os.path.join(folder, filename)
+    temp_name = f"__tmp_rename_{idx:05d}__{filename}"
+    temp_path = os.path.join(folder, temp_name)
+    os.rename(old_path, temp_path)
+    temp_pairs.append((temp_path, filename))
+
+# Second pass: assign final names while preserving original extension.
+for i, (temp_path, original_name) in enumerate(temp_pairs, start=start_index):
+    _, ext = os.path.splitext(original_name)
     new_filename = f"{prefix}{i:05d}{ext}"
     new_path = os.path.join(folder, new_filename)
-    os.rename(old_path, new_path)
+    os.rename(temp_path, new_path)
 
-print("✅ Zmieniono nazwy wszystkich plików")
+print("Zmieniono nazwy wszystkich plikow (rozszerzenia pozostaly bez zmian).")
 
-# empty 534
+# empty 97
 
-# white 154
-
-# black 128
+# white 97
+# black 33

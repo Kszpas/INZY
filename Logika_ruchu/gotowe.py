@@ -4,6 +4,7 @@ import chess
 import time
 import threading
 import os
+import json
 import tensorflow as tf
 from tensorflow.keras.preprocessing import image
 import matplotlib.pyplot as plt
@@ -13,7 +14,7 @@ from tkinter import font
 import plansza
 
 # === PARAMETRY ===
-CAMERA_INDEX = 0
+CAMERA_INDEX = 1
 OUTPUT_SIZE = (512, 512)
 ANALYSIS_INTERVAL = 3  # sekundy między analizami
 CLASS_NAMES = ["black", "empty", "white"]
@@ -30,6 +31,7 @@ lock = threading.Lock()
 stop_flag = False
 move_history = []
 MOVE_HISTORY_FILE = os.path.join(os.path.dirname(__file__), 'move_history.txt')
+CALIBRATION_FILE = os.path.join(os.path.dirname(__file__), 'camera_calibration.json')
 
 # === INICJALIZACJA ===
 cap = cv.VideoCapture(CAMERA_INDEX)
@@ -43,6 +45,92 @@ mode = 'none'
 warped = None
 # tkinter root (will be created when entering preview mode)
 root = None
+analysis_counter = 0
+
+
+def compute_perspective_matrix(corner_points):
+    """Build perspective transform matrix from 4 clicked corners."""
+    if len(corner_points) != 4:
+        return None
+    pts1 = np.float32(corner_points)
+    pts2 = np.float32([
+        [0, 0],
+        [OUTPUT_SIZE[0], 0],
+        [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
+        [0, OUTPUT_SIZE[1]]
+    ])
+    return cv.getPerspectiveTransform(pts1, pts2)
+
+
+def save_calibration():
+    """Persist selected corners and grid lines so calibration survives restart."""
+    data = {
+        "camera_index": CAMERA_INDEX,
+        "output_size": list(OUTPUT_SIZE),
+        "points": [list(p) for p in points],
+        "vertical_lines": [list(p) for p in vertical_lines],
+        "horizontal_lines": [list(p) for p in horizontal_lines],
+    }
+    try:
+        with open(CALIBRATION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Nie mozna zapisac kalibracji: {e}")
+
+
+def load_calibration():
+    """Load saved calibration from disk if available and valid."""
+    global points, vertical_lines, horizontal_lines, transform_ready, M
+    if not os.path.exists(CALIBRATION_FILE):
+        return False
+
+    try:
+        with open(CALIBRATION_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Nie mozna wczytac kalibracji: {e}")
+        return False
+
+    loaded_points = [tuple(p) for p in data.get("points", [])]
+    loaded_vertical = [tuple(p) for p in data.get("vertical_lines", [])]
+    loaded_horizontal = [tuple(p) for p in data.get("horizontal_lines", [])]
+
+    if len(loaded_points) != 4:
+        print("Pomijam kalibracje: brak 4 punktow rogow.")
+        return False
+
+    matrix = compute_perspective_matrix(loaded_points)
+    if matrix is None:
+        return False
+
+    points = loaded_points
+    vertical_lines = loaded_vertical[:9]
+    horizontal_lines = loaded_horizontal[:9]
+    M = matrix
+    transform_ready = True
+
+    print(
+        "Zaladowano kalibracje: "
+        f"rogi=4, pionowe={len(vertical_lines)}, poziome={len(horizontal_lines)}"
+    )
+    return True
+
+
+def reset_calibration(remove_saved=True):
+    """Clear in-memory calibration and optionally remove saved file."""
+    global points, transform_ready, M, vertical_lines, horizontal_lines, mode
+    points = []
+    transform_ready = False
+    M = None
+    vertical_lines = []
+    horizontal_lines = []
+    mode = 'none'
+    if remove_saved and os.path.exists(CALIBRATION_FILE):
+        try:
+            os.remove(CALIBRATION_FILE)
+            print("Usunieto zapis kalibracji.")
+        except Exception as e:
+            print(f"Nie mozna usunac pliku kalibracji: {e}")
 
 
 # --- WYBÓR ROGÓW ---
@@ -52,16 +140,10 @@ def select_corner(event, x, y, flags, param):
         points.append((x, y))
         print(f"Punkt {len(points)}: {x},{y}")
         if len(points) == 4:
-            pts1 = np.float32(points)
-            pts2 = np.float32([
-                [0, 0],
-                [OUTPUT_SIZE[0], 0],
-                [OUTPUT_SIZE[0], OUTPUT_SIZE[1]],
-                [0, OUTPUT_SIZE[1]]
-            ])
-            M = cv.getPerspectiveTransform(pts1, pts2)
+            M = compute_perspective_matrix(points)
             transform_ready = True
             print("✅ Wybrano 4 punkty — plansza wyprostowana.")
+            save_calibration()
 
 # --- WYBÓR LINII ---
 def select_point(event, x, y, flags, param):
@@ -70,9 +152,19 @@ def select_point(event, x, y, flags, param):
         return
     if event == cv.EVENT_LBUTTONDOWN:
         if mode == 'vertical':
-            vertical_lines.append((x, y))
+            if len(vertical_lines) < 9:
+                vertical_lines.append((x, y))
+                print(f"Pionowe: {len(vertical_lines)}/9")
+                save_calibration()
+            else:
+                print("Masz juz 9 linii pionowych.")
         elif mode == 'horizontal':
-            horizontal_lines.append((x, y))
+            if len(horizontal_lines) < 9:
+                horizontal_lines.append((x, y))
+                print(f"Poziome: {len(horizontal_lines)}/9")
+                save_calibration()
+            else:
+                print("Masz juz 9 linii poziomych.")
 
 def draw_grid(frame, v_lines, h_lines):
     v_lines = sorted(v_lines, key=lambda p: p[0])
@@ -86,9 +178,11 @@ def draw_grid(frame, v_lines, h_lines):
 
 cv.namedWindow("Kamera")
 cv.setMouseCallback("Kamera", select_corner)
+load_calibration()
 
 # --- ANALIZA PLANSZY ---
 def analyze_board_with_model(warped_img, v_lines, h_lines):
+    global analysis_counter
     v = sorted(v_lines, key=lambda p: p[0])
     h = sorted(h_lines, key=lambda p: p[1])
     if len(v) != 9 or len(h) != 9:
@@ -116,11 +210,21 @@ def analyze_board_with_model(warped_img, v_lines, h_lines):
     labels = [CLASS_NAMES[np.argmax(p)] for p in preds]
     board_results = dict(zip(coords, labels))
 
-    # czytelny wydruk
-    
+    # Czytelny wydruk: każda analiza ma swój blok z nagłówkiem i separatorami.
+    analysis_counter += 1
+    stamp = datetime.now().strftime('%H:%M:%S')
+    symbol_map = {"white": "W", "black": "B", "empty": "."}
+    print("\n" + "=" * 78)
+    print(f"ANALIZA #{analysis_counter} | {stamp} | klasy: W=white, B=black, .=empty")
+    print("      a  b  c  d  e  f  g  h")
+
     for rank in range(8, 0, -1):
-        rank_data = [(sq, board_results[sq]) for sq in sorted(board_results) if sq.endswith(str(rank))]
-        print(f"Rząd {rank}: ", rank_data)
+        rank_squares = [f"{chr(ord('a') + c)}{rank}" for c in range(8)]
+        rank_data = [(sq, board_results[sq]) for sq in rank_squares]
+        row_symbols = "  ".join(symbol_map[board_results[sq]] for sq in rank_squares)
+        print(f"Rzad {rank}: {row_symbols}   {rank_data}")
+
+    print("=" * 78 + "\n")
 
     return board_results
 
@@ -302,7 +406,7 @@ def prediction_loop():
             prev_state = state
         
 # --- GŁÓWNA PĘTLA ---
-print("Sterowanie: [v] - pionowe, [h] - poziome, [q] - start")
+print("Sterowanie: [v] - pionowe, [h] - poziome, [r] - reset kalibracji, [q] - start")
 
 predict_thread = None
 
@@ -329,6 +433,9 @@ while True:
         mode = 'horizontal'
         cv.setMouseCallback("Zaznacz linie", select_point)
         print("🟦 Klikaj 9 poziomych linii.")
+    elif key == ord('r'):
+        reset_calibration(remove_saved=True)
+        print("Reset kalibracji. Wybierz 4 rogi od nowa.")
     elif key == ord('q'):
         print("▶️ Start analizy w tle...")
         if predict_thread is None:
