@@ -5,23 +5,23 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 from tensorflow.keras.regularizers import l2
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 from sklearn.utils import class_weight
 import numpy as np
 
 # 1️⃣ PARAMETRY
-IMG_SIZE = (64, 64)
-BATCH_SIZE = 32
-EPOCHS = 25
+IMG_SIZE = (96, 96)
+BATCH_SIZE = 16
+EPOCHS = 60
 
 # 2️⃣ GENERATORY DANYCH z AUGMENTACJĄ
 train_datagen = ImageDataGenerator(
     rescale=1./255,
-    rotation_range=25,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    zoom_range=0.25,
-    brightness_range=[0.7, 1.3],
+    rotation_range=10,
+    width_shift_range=0.08,
+    height_shift_range=0.08,
+    zoom_range=0.12,
+    brightness_range=[0.8, 1.2],
     horizontal_flip=True,
     fill_mode='nearest'
 )
@@ -74,15 +74,16 @@ model = Sequential([
 
 # 5️⃣ KOMPILACJA MODELU
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
-    loss='categorical_crossentropy',
+    optimizer=tf.keras.optimizers.Adam(learning_rate=3e-4),
+    loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.05),
     metrics=['accuracy']
 )
 
 # 6️⃣ CALLBACKS – EARLY STOPPING i ZAPIS NAJLEPSZYCH WAG
 callbacks = [
-    EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True),
-    ModelCheckpoint('models/field_classifier_balanced.keras', save_best_only=True)
+    EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
+    ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1),
+    ModelCheckpoint('models/field_classifier_balanced.keras', save_best_only=True, monitor='val_loss')
 ]
 
 # 7️⃣ TRENING Z CLASS WEIGHT
@@ -95,8 +96,8 @@ history = model.fit(
 )
 
 # 8️⃣ ZAPIS MODELU PO TRENINGU
-model.save('models/field_classifier_final_balanced.keras')
-print("✅ Model wytrenowany i zapisany jako field_classifier_final_balanced.keras")
+model.save('models/model_szachowy.keras')
+print("✅ Model wytrenowany i zapisany jako model_szachowy.keras")
 
 # 9️⃣ WYKRESY DO DIAGNOZY
 import matplotlib.pyplot as plt
